@@ -1,0 +1,87 @@
+// Internal Wiki AI Search — Prisma schema
+//
+// SQLite is used as the local-first store. WikiChunk embeddings are
+// serialised as JSON arrays of numbers in `WikiChunk.embedding` so we can
+// compute cosine similarity in app code without requiring sqlite-vec /
+// pgvector extensions. Access tags are stored as a comma-joined string and
+// parsed at query time; the intersection is computed in `filterChunksByAccess`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  roles     String   // comma-joined role tags (e.g. "engineering,finance" or "all")
+  createdAt DateTime @default(now())
+}
+
+model WikiPage {
+  id         String   @id @default(cuid())
+  source     String   // "manual" | "confluence" | "notion" | "slack" | "drive" (MVP = manual)
+  externalId String?  // optional id in the upstream source system
+  title      String
+  url        String?
+  content    String   // raw markdown
+  accessTags String   // comma-joined access tags (empty = public)
+  ingestedAt DateTime @default(now())
+
+  chunks WikiChunk[]
+
+  @@unique([source, title])
+  @@index([source])
+}
+
+model WikiChunk {
+  id         String   @id @default(cuid())
+  pageId     String
+  page       WikiPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  ordinal    Int
+  heading    String   // nearest preceding heading (e.g. "## Architecture")
+  content    String   // chunk text (markdown)
+  tokens     String   // JSON-stringified token array (used by BM25)
+  embedding  String   // JSON-stringified Float32Array (used by vector search)
+  accessTags String   // comma-joined access tags (inherits page tags at ingest time)
+  createdAt  DateTime @default(now())
+
+  @@index([pageId])
+}
+
+model ChatSession {
+  id        String   @id @default(cuid())
+  title     String
+  userId    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages ChatMessage[]
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role      String   // "user" | "assistant" | "system"
+  content   String   // raw text of the message (assistant message may contain [^c1] markers)
+  citations String?  // JSON array of source-provenance cards
+  denied    Boolean  @default(false)  // true when RBAC filter returned 0 chunks (safe-mode fallback)
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+}
+
+model AuditLog {
+  id            String   @id @default(cuid())
+  userId        String   // which user issued the query (mocked id from the role picker)
+  query         String   // the raw user query
+  chunksReturned Int     // how many chunks passed the RBAC filter and were sent to the LLM
+  denied        Boolean  // true when chunksReturned === 0 (safe-mode fallback fired)
+  createdAt     DateTime @default(now())
+}
